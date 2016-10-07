@@ -7,7 +7,8 @@ MSQuery *REQUIRES* a valid UT2004 CD key. Place this in a text file containing j
 
 ## Using MSQuery
 First, create a MSConnection object; this will prepare a connection to the UT2004 master server (it won't connect just yet). To get a list of servers, use the `query_servers(query type, keyword)` method.  
-```with MSConnection() as ms:
+```
+with MSConnection() as ms:
     for server in ms.query_servers("gametype", "xDeathMatch"):
         print server.ip + ':' + str(server.port)
 ```

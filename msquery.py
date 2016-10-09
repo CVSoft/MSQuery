@@ -5,7 +5,7 @@ import sys
 from hashlib import md5
 from time import time, sleep
 
-VERSION = "1.0"
+VERSION = "1.1"
 
 # Errors:
 #   0x1000 block: Authentication errors
@@ -267,7 +267,8 @@ class MSServer(object):
         self.max_players = None
         self.name = None
         self.map_name = None
-        self.filters = None
+        self.flags_byte = None
+        self.filters_byte = None
         self.flags = {"Classic":False,
                       "Standard":False,
                       "Instagib":False,
@@ -275,7 +276,7 @@ class MSServer(object):
                       "Latest":False,
                       "Stats":False,
                       "Password":False}
-        self.filters = {"HasPlayers":False} # Not all filters are documented yet
+        self.filters = {"HasPlayers":None} # Not all filters are documented yet
         self.param_f = None # These are leftover data
         self.param_g = None # When you split up rawline as uint32 and lp-string,
         self.param_h = None # you got params a - h. that's how these got named
@@ -293,9 +294,10 @@ class MSServer(object):
         ip, sp, qp = struct.unpack("<IHH", self.rawline[i:i+8])
         i += 8
         sn = clean_name(unpack(self.rawline, i))
-        i += 2 + len(sn)
+        i += 1 + ord(self.rawline[i])
         mn = clean_name(unpack(self.rawline, i))
-        i += 2 + len(mn)
+        i += 1 + ord(self.rawline[i])
+        if len(self.rawline[i:i+12]) == 10: self.rawline += "\x00\x00" # >.>
         if len(self.rawline[i:i+12]) == 12:
             f, f1, cp, mp, fl, g, h = struct.unpack("<HBBBBHI",
                                                 self.rawline[i:i+12])
@@ -304,7 +306,9 @@ class MSServer(object):
             self.param_f = f
             self.param_g = g
             self.param_h = h
-            self.filters = (h & 0xff0000) / 65536
+            self.filters_byte = (h & 0xff0000) / 65536
+            self.flags_byte = fl
+            self.filters = {"HasPlayers":bool(self.filters_byte & 0x1)}
             self.flags = {"Classic":bool(fl & 0x40),
                           "Standard":bool(fl & 0x20),
                           "Instagib":bool(fl & 0x10),
@@ -318,6 +322,30 @@ class MSServer(object):
         self.ip = int_to_ip(ip)
         return self #??
 
+    def parse_debug(self):
+        """I intended this to be troubleshooting code, but it does a good job \
+at explaining how entries are formatted."""
+        i = 0
+        hm = ' '.join(map(lambda q:(hex(ord(q))+'   ')[2:4], self.rawline))
+        i += 8
+        print hm[0:3*i]
+        print "|____IP____||_SP_||_QP_|\n"
+        nl = ord(self.rawline[i])
+        print hm[3*i:3*(nl+i+1)]
+        print '   '+''.join(map(lambda q:q+'  ', self.rawline[i+1:i+nl]))
+        print "|L||___Srv_Name --->\n"
+        i += nl + 1
+        ml = ord(self.rawline[i])
+        print hm[3*i:3*(i+ml+1)]
+        print '   '+''.join(map(lambda q:q+'  ', self.rawline[i+1:i+ml]))
+        print "|L||___Map_Name --->\n"
+        i += ml + 1
+        print hm[3*i:3*(i+4)], "\n         CP\n|_Param_F_|\n"
+        i += 4
+        print hm[3*i:3*(i+4)], "\nMP FL __G__\n|_Param_G_|\n"
+        i += 4
+        print hm[3*i:3*(i+4)], "\n      FI   \n|_Param_H_|\n\n\n"
+        i += 4
 
 ################################################################################
 # Utility routines
@@ -356,12 +384,17 @@ def main():
     ms = MSConnection()
     sl = ms.query_servers("gametype", "xDeathMatch") # Search for DM servers
     print "Received %d servers!" % len(sl)
+    c = 0
     for s in sorted(sl, key=lambda q:q.ip):
         # Sometimes (more often if not using trust_server), data isn't valid
         # I think read_raw fixed the length issues, so something is very wrong
         # if an invalid server is displayed with trust_server True
-        if s.filters == None: print "The following server is invalid!"
+        if s.filters_byte == None: print "The following server is invalid!"
         print "%s:%d\t%s" % (s.ip, s.port, s.name)
+        if s.filters_byte == None:
+            c += 1
+##            s.parse_debug()
+    print "Invalid server records:", c
 
 
 # Only run demo if running this module directly

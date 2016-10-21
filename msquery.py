@@ -5,7 +5,7 @@ import sys
 from hashlib import md5
 from time import time, sleep
 
-VERSION = "1.1"
+VERSION = "1.21"
 
 # Errors:
 #   0x1000 block: Authentication errors
@@ -106,11 +106,12 @@ class MSConnection(object):
     #   stuff for our socket
     def connect(self):
         """Connect to master server. Must authenticate upon connecting."""
+        self.last_error = None
         try:
             self.s.connect(self.addr)
         except socket.error:
             self.reset_socket()
-        self.connected = True
+        self.connected = not bool(self.last_error)
         self.authenticated = False
 
     def disconnect(self):
@@ -121,6 +122,7 @@ class MSConnection(object):
             pass # don't set error number as we could overwrite a real error
         self.connected = False
         self.authenticated = False
+        self.last_error = None
 
     def reset_socket(self):
         """Closes, recreates, and reopens socket"""
@@ -191,7 +193,7 @@ class MSConnection(object):
         """Prepare the two MD5 hashes for the authorization challenge"""
         # The first MD5 is that of the CD key
         # The second MD5 is CD key with challenge appended to it, no delimiter
-        if not self.cdkey: load_cd_key()
+        if not self.cdkey: self.load_cd_key()
         if not self.cdkey:
             self.last_error = E_BAD_CDKEY #CD key not found
         return (md5(self.cdkey).hexdigest(),
@@ -208,13 +210,15 @@ class MSConnection(object):
         self.write("%s%s%s)\r\x00\x00\x05%s\x16\x04\x00\x00\x86\x80\x00\x00\
 \x18\x00\x00\x00\x00" % tuple(map(pack, [h[0], h[1], "UT2K4CLIENT", "int"])))
         # check if we were approved
-        a = unpack(self.read())
+        try: a = unpack(self.read())
+        except TypeError: a = ''
         if a != "APPROVED":
             self.disconnect()
             self.last_error = E_APPROVE_FAILURE
             return False
         self.write(pack("0014e800000000000000000000000000"))
-        a = unpack(self.read())
+        try: a = unpack(self.read())
+        except TypeError: a = ''
         # now check if we were verified
         if a != "VERIFIED":
             self.disconnect()
@@ -224,11 +228,19 @@ class MSConnection(object):
         return True
 
 #   stuff for actually using the object
-    def query_servers(self, qtype, qval, hdr=256):
-        """Request of type qtype for servers matching qval"""
-        # I have no idea what hdr means, maybe it's qtype type? Is it a byte?
+    def query_servers(self, query={}):
+        """Query master server for game servers matching dict query"""
         if not self.authenticated: self.authenticate()
-        q = struct.pack("<H", hdr) + pack(qtype) + pack(qval) + '\x00'
+        if self.last_error:
+            if self.last_error & 0x1fff: return []
+        if len(query) == 0: query = {'':''} # This works!
+        q = '\x00'+chr(len(query))
+        for query_param in query:
+            # a header of 0 1 is hardcoded
+            # the rstrip allows for duplicate search parameters
+            # starting query_param with ^ means not(query_param)
+            q += pack(query_param.rstrip('_').lstrip('^')) + \
+                 pack(query[query_param]) + chr(4*(query_param.startswith('^')))
         ts = time()
         self.write(q)
         l = struct.unpack("<IB", self.read())[0]
@@ -240,18 +252,16 @@ class MSConnection(object):
                 data = self.read()
                 sl.append(MSServer(data))
         else:
-            for c in xrange(max(0, l-4)): #why l-4? i have no idea
+            for c in xrange(max(0, l)):
                 #use raw socket when not trusting server
-                print "Recv server %d of %d" % (c, l)
                 lh = self.read_raw(4) #skip length header
                 data = self.read_raw(8) #header ints/shorts
                 nl = self.read_raw(1) #length of server name
                 data += nl + self.read_raw(ord(nl)) #server name
                 nl = self.read_raw(1) #length of map name
                 data += nl + self.read_raw(ord(nl)) #map name
-                data += self.read_raw(12) #remaining bytes/shorts/ints
+                data += self.read_raw(12) #SOMETIMES TEN -- TRUST THE SERVER
                 sl.append(MSServer(data))
-                print sl[-1].name
         self.disconnect() # apparently server closes connection
         return sl
 
@@ -382,19 +392,19 @@ def int_to_ip(i):
 
 def main():
     ms = MSConnection()
-    sl = ms.query_servers("gametype", "xDeathMatch") # Search for DM servers
+    # Search for DM servers with players online
+    sl = ms.query_servers({"gametype":"xDeathMatch",
+                           "^currentplayers":"0"}) 
     print "Received %d servers!" % len(sl)
     c = 0
     for s in sorted(sl, key=lambda q:q.ip):
-        # Sometimes (more often if not using trust_server), data isn't valid
-        # I think read_raw fixed the length issues, so something is very wrong
-        # if an invalid server is displayed with trust_server True
-        if s.filters_byte == None: print "The following server is invalid!"
         print "%s:%d\t%s" % (s.ip, s.port, s.name)
-        if s.filters_byte == None:
+        if s.filters_byte == None: #A server record was invalid
             c += 1
 ##            s.parse_debug()
     print "Invalid server records:", c
+    if ms.last_error: hex(ms.check_error())
+    ms.disconnect()
 
 
 # Only run demo if running this module directly
